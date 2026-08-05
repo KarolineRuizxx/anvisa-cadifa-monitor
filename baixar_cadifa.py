@@ -40,18 +40,64 @@ REPORT_URL = (
 PAGE_SIZE = 10000
 
 
+def _contar_colunas_select(payload_str: str) -> int:
+    """Conta quantas colunas uma requisicao querydata capturada esta
+    selecionando. Usado para distinguir a consulta da tabela principal
+    das consultas menores (contadores, data de atualizacao, filtros)."""
+    try:
+        payload = json.loads(payload_str)
+        query = payload["queries"][0]["Query"]["Commands"][0]["SemanticQueryDataShapeCommand"]["Query"]
+        return len(query["Select"])
+    except (KeyError, IndexError, TypeError, json.JSONDecodeError):
+        return -1
+
+
+def _localizar_botao_pesquisar(page):
+    """Encontra, entre os botoes de acao do painel (classe
+    visual-actionButton), o que fica mais proximo do texto "PESQUISAR" --
+    o painel tem outros botoes de acao (ex.: o icone de informacoes) que
+    nao devem ser clicados no lugar dele."""
+    botoes = page.locator(".visual-actionButton").all()
+    if not botoes:
+        return None
+
+    try:
+        texto_bbox = page.get_by_text("PESQUISAR", exact=True).first.bounding_box(timeout=5000)
+    except Exception:
+        texto_bbox = None
+
+    if texto_bbox is None:
+        return botoes[-1]
+
+    def distancia_vertical(botao):
+        bbox = botao.bounding_box()
+        if not bbox:
+            return float("inf")
+        return abs(bbox["y"] - texto_bbox["y"])
+
+    return min(botoes, key=distancia_vertical)
+
+
 def capturar_consulta_real() -> dict:
-    """Abre o painel num navegador headless e captura a primeira
-    requisicao real de querydata que ele mesmo dispara -- com os
-    nomes de coluna ATUAIS do modelo de dados da Anvisa."""
-    capturado = {}
+    """Abre o painel num navegador headless e captura a consulta real
+    que ele dispara -- com os nomes de coluna ATUAIS do modelo de dados
+    da Anvisa.
+
+    O painel e uma tela de filtros (detentor da CADIFA / IFA) com um
+    botao "PESQUISAR": a tabela completa so e carregada depois de clicar
+    nesse botao. Antes e depois do clique o painel tambem dispara
+    consultas menores (data de atualizacao, contadores), entao capturamos
+    todas as requisicoes querydata da sessao e escolhemos a que tem mais
+    colunas selecionadas -- essa e a tabela principal."""
+    capturados = []
 
     def handle_request(request):
         if "querydata" in request.url and request.method == "POST":
-            if "payload" not in capturado:
-                capturado["url"] = request.url
-                capturado["payload"] = request.post_data
-                capturado["headers"] = dict(request.headers)
+            capturados.append({
+                "url": request.url,
+                "payload": request.post_data,
+                "headers": dict(request.headers),
+            })
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -59,22 +105,31 @@ def capturar_consulta_real() -> dict:
         page.on("request", handle_request)
 
         page.goto(REPORT_URL, wait_until="load", timeout=60000)
+        page.wait_for_timeout(4000)
+
+        try:
+            botao = _localizar_botao_pesquisar(page)
+            if botao is not None:
+                botao.click(timeout=10000)
+        except Exception:
+            pass  # se o botao nao existir mais, segue só com o que já carregou
 
         tentativas = 0
-        while "payload" not in capturado and tentativas < 20:
+        while tentativas < 20:
             page.wait_for_timeout(1000)
             tentativas += 1
 
         browser.close()
 
-    if "payload" not in capturado:
+    if not capturados:
         raise RuntimeError(
-            "Nao foi possivel capturar a requisicao querydata do painel. "
+            "Nao foi possivel capturar nenhuma requisicao querydata do painel. "
             "O layout/estrutura visual do painel pode ter mudado -- "
             "seria necessario inspecionar manualmente via DevTools."
         )
 
-    return capturado
+    melhor = max(capturados, key=lambda c: _contar_colunas_select(c["payload"]))
+    return melhor
 
 
 def extrair_nomes_amigaveis(payload_str: str) -> list:
@@ -181,11 +236,28 @@ def decodificar_dsr(resposta: dict, nomes_amigaveis: list = None) -> pd.DataFram
 
     df = pd.DataFrame(linhas_decodificadas, columns=nomes_finais)
 
-    # Converte colunas de data (formato "dd/MM/yyyy" no schema) de epoch ms
+    # Converte colunas de data de epoch ms para dd/MM/yyyy.
+    # O schema as vezes traz o formato explicito ("Format": "dd/MM/yyyy"),
+    # mas nem sempre -- por isso tambem usamos uma heuristica de faixa:
+    # valores inteiros nao-dicionarizados plausiveis como epoch ms
+    # (entre os anos 2000 e 2100) sao tratados como data.
+    EPOCH_MS_MIN = 946684800000  # 01/01/2000
+    EPOCH_MS_MAX = 4102444800000  # 01/01/2100
+
     for i, col in enumerate(colunas):
         fmt = col.get("Format", "")
-        if isinstance(fmt, str) and "d" in fmt.lower() and "y" in fmt.lower():
-            nome_col = nomes_finais[i]
+        parece_data_por_formato = isinstance(fmt, str) and "d" in fmt.lower() and "y" in fmt.lower()
+
+        nome_col = nomes_finais[i]
+        valores_nao_nulos = df[nome_col].dropna()
+        parece_data_por_faixa = (
+            not col.get("DN")
+            and not valores_nao_nulos.empty
+            and valores_nao_nulos.apply(lambda v: isinstance(v, int)).all()
+            and valores_nao_nulos.between(EPOCH_MS_MIN, EPOCH_MS_MAX).all()
+        )
+
+        if parece_data_por_formato or parece_data_por_faixa:
             try:
                 df[nome_col] = pd.to_datetime(df[nome_col], unit="ms").dt.strftime("%d/%m/%Y")
             except Exception:
