@@ -42,10 +42,10 @@ def montar_payload(window_count: int) -> dict:
             {"Name": "t1", "Entity": "TA_HISTORICO_PETICAO", "Type": 0},
         ],
         "Select": [
-            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NO_RAZAO_SOCIAL"},
-             "Name": "TA_DADOS_CADIFA.NO_RAZAO_SOCIAL", "NativeReferenceName": "Razão Social da Empresa"},
-            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NO_INSUMO"},
-             "Name": "TA_DADOS_CADIFA.NO_INSUMO", "NativeReferenceName": "Nome do Insumo"},
+            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NO_RAZAO_SOCIAL_MAISC"},
+             "Name": "TA_DADOS_CADIFA.NO_RAZAO_SOCIAL_MAISC", "NativeReferenceName": "Razão Social da Empresa"},
+            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NO_INSUMO_MINUSC"},
+             "Name": "TA_DADOS_CADIFA.NO_INSUMO_MINUSC", "NativeReferenceName": "Nome do Insumo"},
             {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NU_PROCESSO"},
              "Name": "TA_DADOS_CADIFA.NU_PROCESSO", "NativeReferenceName": "Nº CADIFA"},
             {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "DS_APRESENTACAO_PRODUTO"},
@@ -55,7 +55,7 @@ def montar_payload(window_count: int) -> dict:
              "Name": "TA_HISTORICO_PETICAO.DT_FIM_SITUACAO", "NativeReferenceName": "Data da Última Situação"},
         ],
         "Where": [
-            {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t1"}},
+            {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
                                                                "Property": "CO_ASSUNTO"}}],
                                    "Values": [[{"Literal": {"Value": "'11637'"}}]]}}},
             {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
