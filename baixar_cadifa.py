@@ -27,6 +27,7 @@ Uso:
 """
 
 import json
+import os
 import uuid
 import requests
 import pandas as pd
@@ -54,7 +55,30 @@ def capturar_consulta_real() -> dict:
                 capturado["headers"] = dict(request.headers)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        proxy_url = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("http_proxy")
+        )
+
+        launch_kwargs = {
+            "headless": True,
+            # --disable-quic: evita que o Chromium tente o protocolo QUIC
+            #   (sobre UDP), que muitos proxies corporativos bloqueiam/resetam.
+            # --ignore-certificate-errors: necessario quando o proxy faz
+            #   inspecao/interceptacao de TLS com um certificado raiz
+            #   proprio que nao esta na lista de confianca do Chromium
+            #   (mesmo estando na do sistema operacional, usada por
+            #   curl/requests).
+            "args": ["--disable-quic", "--ignore-certificate-errors"],
+        }
+        if proxy_url:
+            # Repassa explicitamente o proxy do ambiente para o Chromium,
+            # caso ele nao pegue automaticamente as variaveis de ambiente.
+            launch_kwargs["proxy"] = {"server": proxy_url}
+
+        browser = p.chromium.launch(**launch_kwargs)
         page = browser.new_page()
         page.on("request", handle_request)
 
