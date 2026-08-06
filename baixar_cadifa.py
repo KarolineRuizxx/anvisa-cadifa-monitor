@@ -1,165 +1,130 @@
 """
-Baixa a lista completa de CADIFA da Anvisa capturando DINAMICAMENTE a
-consulta real que o navegador faz ao abrir o painel (via Playwright),
-em vez de hardcodar nomes de coluna/entidade.
+Baixa a lista de CADIFAs com status "Deferida" do Painel Cadifa da Anvisa
+(Power BI publico), decodificando o formato compactado da resposta.
 
-Por que isso importa:
-    A versao anterior deste script tinha os nomes das colunas
-    (NO_RAZAO_SOCIAL, NO_INSUMO, CO_ASSUNTO, etc.) fixos no codigo.
-    Quando a Anvisa mudou o modelo de dados do painel, esses nomes
-    deixaram de existir e o script parou de funcionar
-    (erro "CouldNotResolveSemanticQueryDefinition").
+Esta versao usa a consulta EXATA capturada do painel em 06/08/2026,
+apos a Anvisa ter reestruturado o painel (nova tela com filtros +
+botao "Pesquisar"). Os nomes de coluna atuais sao:
+    NO_RAZAO_SOCIAL_MAISC, NO_INSUMO_MINUSC, NU_PROCESSO,
+    DS_APRESENTACAO_PRODUTO, DT_FIM_SITUACAO (agregacao MAX)
+Filtro atual: DS_SITUACAO_APRESENTACAO = 'Deferida' (unico filtro --
+o painel novo nao usa mais o filtro de CO_ASSUNTO/DS_ASSUNTO da
+versao antiga).
 
-    Esta versao evita isso: ela abre o painel de verdade num navegador
-    headless, captura a consulta que o PROPRIO painel envia (sempre com
-    os nomes atuais, corretos), e so ajusta o tamanho da pagina antes
-    de repetir essa mesma consulta via requests. Assim, o script se
-    adapta automaticamente a mudancas de nome de coluna. Ele só quebra
-    se a Anvisa mudar a ESTRUTURA VISUAL do painel (ex.: remover a
-    tabela inteira), o que é bem mais raro.
+Se a Anvisa mudar o esquema de novo, o sintoma sera um erro
+"CouldNotResolveSemanticQueryDefinition". Nesse caso, é necessario
+capturar a consulta atualizada de novo via DevTools (F12 -> Network
+-> filtrar "querydata" -> Payload) e atualizar a funcao
+montar_payload() abaixo.
 
 Requisitos:
-    pip install playwright requests pandas openpyxl
-    playwright install chromium --with-deps
+    pip install requests pandas openpyxl
 
 Uso:
     python baixar_cadifa.py
 """
 
 import json
-import os
 import uuid
 import requests
 import pandas as pd
-from playwright.sync_api import sync_playwright
 
-REPORT_URL = (
-    "https://app.powerbi.com/view?r=eyJrIjoiOTQwZDZjZWEtNzUwNy00MTdhLTk3ZDEtN2VhNDM2ZDNhMTEzIiwidCI6ImI2N2FmMjNmLWMzZjMtNGQzNS04MGM3LWI3MDg1ZjVlZGQ4MSJ9"
-)
+RESOURCE_KEY = "940d6cea-7507-417a-97d1-7ea436d3a113"
+TENANT_ID = "b67af23f-c3f3-4d35-80c7-b7085f5edd81"
+QUERY_URL = "https://wabi-brazil-south-api.analysis.windows.net/public/reports/querydata?synchronous=true"
 
-# Quantas linhas pedir. Comece alto; reduza se o servidor recusar.
+# Quantas linhas pedir. Hoje (06/08/2026) ha 578 deferidas -- deixamos
+# bem acima disso para folga.
 PAGE_SIZE = 10000
 
 
-def capturar_consulta_real() -> dict:
-    """Abre o painel num navegador headless e captura a primeira
-    requisicao real de querydata que ele mesmo dispara -- com os
-    nomes de coluna ATUAIS do modelo de dados da Anvisa."""
-    capturado = {}
+def montar_payload(window_count: int) -> dict:
+    query = {
+        "Version": 2,
+        "From": [
+            {"Name": "t", "Entity": "TA_DADOS_CADIFA", "Type": 0},
+            {"Name": "t1", "Entity": "TA_HISTORICO_PETICAO", "Type": 0},
+        ],
+        "Select": [
+            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NO_RAZAO_SOCIAL_MAISC"},
+             "Name": "TA_DADOS_CADIFA.NO_RAZAO_SOCIAL_MAISC", "NativeReferenceName": "Razão Social da Empresa1"},
+            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NO_INSUMO_MINUSC"},
+             "Name": "TA_DADOS_CADIFA.NO_INSUMO_MINUSC", "NativeReferenceName": "Nome do Insumo"},
+            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "NU_PROCESSO"},
+             "Name": "TA_DADOS_CADIFA.NU_PROCESSO", "NativeReferenceName": "Nº Cadifa"},
+            {"Column": {"Expression": {"SourceRef": {"Source": "t"}}, "Property": "DS_APRESENTACAO_PRODUTO"},
+             "Name": "TA_DADOS_CADIFA.DS_APRESENTACAO_PRODUTO", "NativeReferenceName": "Revisão"},
+            {"Aggregation": {"Expression": {"Column": {"Expression": {"SourceRef": {"Source": "t1"}},
+                                                        "Property": "DT_FIM_SITUACAO"}}, "Function": 4},
+             "Name": "TA_HISTORICO_PETICAO.DT_FIM_SITUACAO", "NativeReferenceName": "Data da Última Situação"},
+        ],
+        "Where": [
+            {"Condition": {"In": {"Expressions": [{"Column": {"Expression": {"SourceRef": {"Source": "t"}},
+                                                               "Property": "DS_SITUACAO_APRESENTACAO"}}],
+                                   "Values": [[{"Literal": {"Value": "'Deferida'"}}]]}}},
+        ],
+        "OrderBy": [{"Direction": 2, "Expression": {"Aggregation": {
+            "Expression": {"Column": {"Expression": {"SourceRef": {"Source": "t1"}},
+                                       "Property": "DT_FIM_SITUACAO"}},
+            "Function": 4}}}],
+    }
 
-    def handle_request(request):
-        if "querydata" in request.url and request.method == "POST":
-            if "payload" not in capturado:
-                capturado["url"] = request.url
-                capturado["payload"] = request.post_data
-                capturado["headers"] = dict(request.headers)
-
-    with sync_playwright() as p:
-        proxy_url = (
-            os.environ.get("HTTPS_PROXY")
-            or os.environ.get("https_proxy")
-            or os.environ.get("HTTP_PROXY")
-            or os.environ.get("http_proxy")
-        )
-
-        launch_kwargs = {
-            "headless": True,
-            # --disable-quic: evita que o Chromium tente o protocolo QUIC
-            #   (sobre UDP), que muitos proxies corporativos bloqueiam/resetam.
-            # --ignore-certificate-errors: necessario quando o proxy faz
-            #   inspecao/interceptacao de TLS com um certificado raiz
-            #   proprio que nao esta na lista de confianca do Chromium
-            #   (mesmo estando na do sistema operacional, usada por
-            #   curl/requests).
-            "args": ["--disable-quic", "--ignore-certificate-errors"],
+    command = {
+        "SemanticQueryDataShapeCommand": {
+            "Query": query,
+            "Binding": {
+                "Primary": {"Groupings": [{"Projections": [0, 1, 2, 3, 4]}]},
+                "DataReduction": {"DataVolume": 3, "Primary": {"Window": {"Count": window_count}}},
+                "Version": 1,
+            },
+            "ExecutionMetricsKind": 1,
         }
-        if proxy_url:
-            # Repassa explicitamente o proxy do ambiente para o Chromium,
-            # caso ele nao pegue automaticamente as variaveis de ambiente.
-            launch_kwargs["proxy"] = {"server": proxy_url}
+    }
 
-        browser = p.chromium.launch(**launch_kwargs)
-        page = browser.new_page()
-        page.on("request", handle_request)
-
-        page.goto(REPORT_URL, wait_until="load", timeout=60000)
-
-        tentativas = 0
-        while "payload" not in capturado and tentativas < 20:
-            page.wait_for_timeout(1000)
-            tentativas += 1
-
-        browser.close()
-
-    if "payload" not in capturado:
-        raise RuntimeError(
-            "Nao foi possivel capturar a requisicao querydata do painel. "
-            "O layout/estrutura visual do painel pode ter mudado -- "
-            "seria necessario inspecionar manualmente via DevTools."
-        )
-
-    return capturado
+    return {
+        "version": "1.0.0",
+        "queries": [{
+            "Query": {"Commands": [command]},
+            "QueryId": "",
+            "ApplicationContext": {
+                "DatasetId": "0dd556db-ae50-4cf0-957e-566ccee995ac",
+                "Sources": [{"ReportId": "1dd397d6-880e-418c-8808-22138d08da99",
+                             "VisualId": "7c9bea16044e5ad9ddcc"}],
+            },
+        }],
+        "cancelQueries": [],
+        "modelId": 8373560,
+    }
 
 
-def extrair_nomes_amigaveis(payload_str: str) -> list:
-    """Le do payload capturado os nomes de exibicao (NativeReferenceName)
-    de cada coluna selecionada, na ordem em que aparecem."""
-    payload = json.loads(payload_str)
-    try:
-        query = payload["queries"][0]["Query"]["Commands"][0]["SemanticQueryDataShapeCommand"]["Query"]
-        selects = query["Select"]
-    except (KeyError, IndexError, TypeError):
-        return None
-
-    nomes = []
-    for item in selects:
-        nome = item.get("NativeReferenceName") or item.get("Name") or "coluna"
-        nomes.append(nome)
-    return nomes
-
-
-def aumentar_paginacao(payload_str: str, window_count: int) -> str:
-    """Troca o valor de Window.Count no payload capturado, mantendo o
-    resto da consulta (com os nomes de coluna atuais) intacto."""
-    payload = json.loads(payload_str)
-
-    def ajustar(obj):
-        if isinstance(obj, dict):
-            if isinstance(obj.get("Window"), dict) and "Count" in obj["Window"]:
-                obj["Window"]["Count"] = window_count
-            for v in obj.values():
-                ajustar(v)
-        elif isinstance(obj, list):
-            for v in obj:
-                ajustar(v)
-
-    ajustar(payload)
-    return json.dumps(payload)
-
-
-def buscar_dados(url: str, payload_str: str, headers_originais: dict) -> dict:
+def buscar_dados(window_count: int) -> dict:
     headers = {
         "Content-Type": "application/json;charset=UTF-8",
         "Accept": "application/json",
+        "X-PowerBI-ResourceKey": RESOURCE_KEY,
         "ActivityId": str(uuid.uuid4()),
         "RequestId": str(uuid.uuid4()),
         "Referer": "https://app.powerbi.com/",
         "Origin": "https://app.powerbi.com",
         "User-Agent": "Mozilla/5.0",
     }
-    for chave in ("x-powerbi-resourcekey", "X-PowerBI-ResourceKey"):
-        if chave in headers_originais:
-            headers["X-PowerBI-ResourceKey"] = headers_originais[chave]
-            break
-
-    resp = requests.post(url, headers=headers, data=payload_str)
+    resp = requests.post(QUERY_URL, headers=headers, data=json.dumps(montar_payload(window_count)))
     resp.raise_for_status()
-    return resp.json()
+    corpo = resp.json()
+
+    resultados = corpo.get("results", [])
+    if resultados:
+        erro = resultados[0].get("result", {}).get("data", {}).get("error")
+        if erro:
+            raise RuntimeError(
+                f"A Anvisa rejeitou a consulta (provavel mudanca de esquema de "
+                f"colunas). Detalhe: {erro}. E necessario capturar a consulta "
+                f"atualizada via DevTools e atualizar montar_payload()."
+            )
+    return corpo
 
 
-def decodificar_dsr(resposta: dict, nomes_amigaveis: list = None) -> pd.DataFrame:
-    """Decodifica o formato compactado DSR do Power BI. Nao depende dos
-    nomes tecnicos das colunas -- so da ordem/estrutura da resposta."""
+def decodificar_dsr(resposta: dict) -> pd.DataFrame:
     result = resposta["results"][0]["result"]["data"]
     dsr = result["dsr"]
     value_dicts = dsr.get("DS", [{}])[0].get("ValueDicts", {})
@@ -198,39 +163,20 @@ def decodificar_dsr(resposta: dict, nomes_amigaveis: list = None) -> pd.DataFram
         linhas_decodificadas.append(linha_final)
         linha_anterior = nova_linha
 
-    if nomes_amigaveis and len(nomes_amigaveis) == len(colunas):
-        nomes_finais = nomes_amigaveis
-    else:
-        nomes_finais = [col.get("N", f"coluna_{i}") for i, col in enumerate(colunas)]
+    nomes_colunas = ["Razão Social", "Insumo (IFA)", "Nº CADIFA", "Revisão", "Data Última Situação (epoch ms)"]
+    df = pd.DataFrame(linhas_decodificadas, columns=nomes_colunas)
 
-    df = pd.DataFrame(linhas_decodificadas, columns=nomes_finais)
-
-    # Converte colunas de data (formato "dd/MM/yyyy" no schema) de epoch ms
-    for i, col in enumerate(colunas):
-        fmt = col.get("Format", "")
-        if isinstance(fmt, str) and "d" in fmt.lower() and "y" in fmt.lower():
-            nome_col = nomes_finais[i]
-            try:
-                df[nome_col] = pd.to_datetime(df[nome_col], unit="ms").dt.strftime("%d/%m/%Y")
-            except Exception:
-                pass  # se nao for epoch, deixa como esta
+    df["Data Última Situação"] = pd.to_datetime(df["Data Última Situação (epoch ms)"], unit="ms").dt.strftime("%d/%m/%Y")
+    df = df.drop(columns=["Data Última Situação (epoch ms)"])
 
     return df
 
 
 def main():
-    print("Abrindo o painel da Anvisa para capturar a consulta atual...")
-    capturado = capturar_consulta_real()
-    print("Consulta capturada com sucesso.")
-
-    nomes_amigaveis = extrair_nomes_amigaveis(capturado["payload"])
-    payload_ajustado = aumentar_paginacao(capturado["payload"], PAGE_SIZE)
-
     print(f"Buscando até {PAGE_SIZE} linhas...")
-    resposta = buscar_dados(capturado["url"], payload_ajustado, capturado["headers"])
-    df = decodificar_dsr(resposta, nomes_amigaveis)
+    resposta = buscar_dados(PAGE_SIZE)
+    df = decodificar_dsr(resposta)
     print(f"Total de linhas obtidas: {len(df)}")
-    print(f"Colunas obtidas: {list(df.columns)}")
 
     if len(df) == PAGE_SIZE:
         print("ATENÇÃO: quantidade retornada igual ao solicitado.")
