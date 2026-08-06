@@ -78,6 +78,15 @@ def capturar_consulta_real() -> dict:
             # caso ele nao pegue automaticamente as variaveis de ambiente.
             launch_kwargs["proxy"] = {"server": proxy_url}
 
+        # Em alguns ambientes o pacote playwright instalado (pip) espera uma
+        # revisao de browser mais nova do que a que esta pre-instalada no
+        # sistema. Se houver um Chromium pre-instalado explicito, usa-o.
+        chromium_pre_instalado = os.environ.get(
+            "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "/opt/pw-browsers/chromium"
+        )
+        if os.path.exists(chromium_pre_instalado):
+            launch_kwargs["executable_path"] = chromium_pre_instalado
+
         browser = p.chromium.launch(**launch_kwargs)
         page = browser.new_page()
         page.on("request", handle_request)
